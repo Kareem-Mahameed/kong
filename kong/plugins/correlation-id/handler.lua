@@ -41,9 +41,11 @@ end
 
 local CorrelationIdHandler = {}
 
-
-CorrelationIdHandler.PRIORITY = 1
-CorrelationIdHandler.VERSION = "2.0.0"
+-- making the priority higher so its will be executed first :
+CorrelationIdHandler.PRIORITY = 1000
+CorrelationIdHandler.VERSION = "2.1.0"
+-- CorrelationIdHandler.PRIORITY = 1
+-- CorrelationIdHandler.VERSION = "2.0.0"
 
 
 function CorrelationIdHandler:init_worker()
