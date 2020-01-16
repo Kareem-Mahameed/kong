@@ -39,20 +39,22 @@ do
 end
 
 
-local CorrelationIdHandler = {}
+local JostleCorrelationIdHandler = {}
+
+-- making the priority higher so its will be executed first :
+JostleCorrelationIdHandler.PRIORITY = 1000
+JostleCorrelationIdHandler.VERSION = "2.0.0"
+-- CorrelationIdHandler.PRIORITY = 1
+-- CorrelationIdHandler.VERSION = "2.0.0"
 
 
-CorrelationIdHandler.PRIORITY = 1
-CorrelationIdHandler.VERSION = "2.0.0"
-
-
-function CorrelationIdHandler:init_worker()
+function JostleCorrelationIdHandler:init_worker()
   worker_uuid = uuid()
   worker_counter = 0
 end
 
 
-function CorrelationIdHandler:access(conf)
+function JostleCorrelationIdHandler:access(conf)
   -- Set header for upstream
   local correlation_id = kong.request.get_header(conf.header_name)
   if not correlation_id then
@@ -70,7 +72,7 @@ function CorrelationIdHandler:access(conf)
 end
 
 
-function CorrelationIdHandler:header_filter(conf)
+function JostleCorrelationIdHandler:header_filter(conf)
   if not conf.echo_downstream then
     return
   end
@@ -82,4 +84,4 @@ function CorrelationIdHandler:header_filter(conf)
 end
 
 
-return CorrelationIdHandler
+return JostleCorrelationIdHandler
