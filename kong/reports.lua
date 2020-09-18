@@ -14,7 +14,6 @@ local subsystem = ngx.config.subsystem
 local concat = table.concat
 local tostring = tostring
 local lower = string.lower
-local ipairs = ipairs
 local pairs = pairs
 local error = error
 local type = type
@@ -40,6 +39,9 @@ local WSS_REQUEST_COUNT_KEY   = "events:requests:wss"
 local STREAM_COUNT_KEY        = "events:streams"
 local TCP_STREAM_COUNT_KEY    = "events:streams:tcp"
 local TLS_STREAM_COUNT_KEY    = "events:streams:tls"
+
+
+local GO_PLUGINS_REQUEST_COUNT_KEY = "events:requests:go_plugins"
 
 
 local _buffer = {}
@@ -203,9 +205,9 @@ end
 -- returns a string indicating the "kind" of the current request/stream:
 -- "http", "https", "h2c", "h2", "grpc", "grpcs", "ws", "wss", "tcp", "tls"
 -- or nil + error message if the suffix could not be determined
-local function get_current_suffix()
+local function get_current_suffix(ctx)
   if subsystem == "stream" then
-    if var.ssl_preread_protocol then
+    if var.ssl_protocol then
       return "tls"
     end
 
@@ -213,8 +215,8 @@ local function get_current_suffix()
   end
 
   local scheme = var.scheme
+  local proxy_mode = var.kong_proxy_mode
   if scheme == "http" or scheme == "https" then
-    local proxy_mode = var.kong_proxy_mode
     if proxy_mode == "http" then
       local http_upgrade = var.http_upgrade
       if http_upgrade and lower(http_upgrade) == "websocket" then
@@ -233,7 +235,7 @@ local function get_current_suffix()
         return "h2"
       end
 
-      return scheme
+      return scheme -- http/https
     end
 
     if proxy_mode == "grpc" then
@@ -247,7 +249,12 @@ local function get_current_suffix()
     end
   end
 
-  return nil, "unknown request scheme: " .. tostring(scheme)
+  if ctx.KONG_UNEXPECTED then
+    return nil
+  end
+
+  log(WARN, "could not determine log suffix (scheme=", tostring(scheme),
+            ", proxy_mode=", tostring(proxy_mode), ")")
 end
 
 
@@ -258,25 +265,28 @@ local function send_ping(host, port)
     _ping_infos.streams     = get_counter(STREAM_COUNT_KEY)
     _ping_infos.tcp_streams = get_counter(TCP_STREAM_COUNT_KEY)
     _ping_infos.tls_streams = get_counter(TLS_STREAM_COUNT_KEY)
+    _ping_infos.go_plugin_reqs = get_counter(GO_PLUGINS_REQUEST_COUNT_KEY)
 
     send_report("ping", _ping_infos, host, port)
 
     reset_counter(STREAM_COUNT_KEY, _ping_infos.streams)
     reset_counter(TCP_STREAM_COUNT_KEY, _ping_infos.tcp_streams)
     reset_counter(TLS_STREAM_COUNT_KEY, _ping_infos.tls_streams)
+    reset_counter(GO_PLUGINS_REQUEST_COUNT_KEY, _ping_infos.go_plugin_reqs)
 
     return
   end
 
-  _ping_infos.requests   = get_counter(REQUEST_COUNT_KEY)
-  _ping_infos.http_reqs  = get_counter(HTTP_REQUEST_COUNT_KEY)
-  _ping_infos.https_reqs = get_counter(HTTPS_REQUEST_COUNT_KEY)
-  _ping_infos.h2c_reqs   = get_counter(H2C_REQUEST_COUNT_KEY)
-  _ping_infos.h2_reqs    = get_counter(H2_REQUEST_COUNT_KEY)
-  _ping_infos.grpc_reqs  = get_counter(GRPC_REQUEST_COUNT_KEY)
-  _ping_infos.grpcs_reqs = get_counter(GRPCS_REQUEST_COUNT_KEY)
-  _ping_infos.ws_reqs    = get_counter(WS_REQUEST_COUNT_KEY)
-  _ping_infos.wss_reqs   = get_counter(WSS_REQUEST_COUNT_KEY)
+  _ping_infos.requests       = get_counter(REQUEST_COUNT_KEY)
+  _ping_infos.http_reqs      = get_counter(HTTP_REQUEST_COUNT_KEY)
+  _ping_infos.https_reqs     = get_counter(HTTPS_REQUEST_COUNT_KEY)
+  _ping_infos.h2c_reqs       = get_counter(H2C_REQUEST_COUNT_KEY)
+  _ping_infos.h2_reqs        = get_counter(H2_REQUEST_COUNT_KEY)
+  _ping_infos.grpc_reqs      = get_counter(GRPC_REQUEST_COUNT_KEY)
+  _ping_infos.grpcs_reqs     = get_counter(GRPCS_REQUEST_COUNT_KEY)
+  _ping_infos.ws_reqs        = get_counter(WS_REQUEST_COUNT_KEY)
+  _ping_infos.wss_reqs       = get_counter(WSS_REQUEST_COUNT_KEY)
+  _ping_infos.go_plugin_reqs = get_counter(GO_PLUGINS_REQUEST_COUNT_KEY)
 
   send_report("ping", _ping_infos, host, port)
 
@@ -289,6 +299,7 @@ local function send_ping(host, port)
   reset_counter(GRPCS_REQUEST_COUNT_KEY, _ping_infos.grpcs_reqs)
   reset_counter(WS_REQUEST_COUNT_KEY,    _ping_infos.ws_reqs)
   reset_counter(WSS_REQUEST_COUNT_KEY,   _ping_infos.wss_reqs)
+  reset_counter(GO_PLUGINS_REQUEST_COUNT_KEY, _ping_infos.go_plugin_reqs)
 end
 
 
@@ -329,27 +340,11 @@ local function configure_ping(kong_conf)
   end
 
   add_immutable_value("database", kong_conf.database)
+  add_immutable_value("role", kong_conf.role)
+  add_immutable_value("kic", kong_conf.kic)
   add_immutable_value("_admin", #kong_conf.admin_listeners > 0 and 1 or 0)
   add_immutable_value("_proxy", #kong_conf.proxy_listeners > 0 and 1 or 0)
   add_immutable_value("_stream", #kong_conf.stream_listeners > 0 and 1 or 0)
-  add_immutable_value("_orig", #kong_conf.origins > 0 and 1 or 0)
-
-  local _tip = 0
-
-  for _, property in ipairs({ "proxy_listeners", "stream_listeners" }) do
-    if _tip == 1 then
-      break
-    end
-
-    for i = 1, #kong_conf[property] or {} do
-      if kong_conf[property][i].transparent then
-        _tip = 1
-        break
-      end
-    end
-  end
-
-  add_immutable_value("_tip", _tip)
 end
 
 
@@ -408,20 +403,22 @@ return {
     return _ping_infos[k]
   end,
   send_ping = send_ping,
-  log = function()
+  log = function(ctx)
     if not _enabled then
       return
     end
 
     local count_key = subsystem == "stream" and STREAM_COUNT_KEY
                                              or REQUEST_COUNT_KEY
-
     incr_counter(count_key)
-    local suffix, err = get_current_suffix()
+
+    if ctx.ran_go_plugin then
+      incr_counter(GO_PLUGINS_REQUEST_COUNT_KEY)
+    end
+
+    local suffix = get_current_suffix(ctx)
     if suffix then
       incr_counter(count_key .. ":" .. suffix)
-    else
-      log(WARN, err)
     end
   end,
 
